@@ -3,11 +3,12 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io/ioutil"
+	"log"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/log"
 )
 
 const (
@@ -199,12 +200,12 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	resp, err := http.Get(e.url + "/ws/v1/cluster/metrics")
 	if err != nil {
-		log.Error(err)
+		log.Fatal(err)
 	}
 	defer resp.Body.Close()
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Error(err)
+		log.Fatal(err)
 	}
 	/*
 	  "clusterMetrics": {
@@ -236,7 +237,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	var f interface{}
 	err = json.Unmarshal(data, &f)
 	if err != nil {
-		log.Error(err)
+		log.Fatal(err)
 	}
 	m := f.(map[string]interface{})
 	cm := m["clusterMetrics"].(map[string]interface{})
@@ -296,8 +297,8 @@ func main() {
 	exporter := NewExporter(*resourceManagerUrl)
 	prometheus.MustRegister(exporter)
 
-	log.Printf("Starting Server: %s", *listenAddress)
-	http.Handle(*metricsPath, prometheus.Handler())
+	log.Println("Starting Server: %s", *listenAddress)
+	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 		<head><title>ResourceManager Exporter</title></head>

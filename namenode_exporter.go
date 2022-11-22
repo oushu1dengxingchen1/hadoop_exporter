@@ -3,319 +3,278 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"io/ioutil"
-	"net/http"
-
+	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/log"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/wyukawa/hadoop_exporter/consts"
+	"github.com/wyukawa/hadoop_exporter/structs"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"strings"
 )
 
-const (
-	namespace = "namenode"
-)
+var NameNodeLabel = []string{consts.ClusterLabel, consts.HostNameLabel}
 
-var (
-	listenAddress  = flag.String("web.listen-address", ":9070", "Address on which to expose metrics and web interface.")
-	metricsPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-	namenodeJmxUrl = flag.String("namenode.jmx.url", "http://localhost:50070/jmx", "Hadoop JMX URL.")
-)
-
-type Exporter struct {
-	url                      string
-	MissingBlocks            prometheus.Gauge
-	CapacityTotal            prometheus.Gauge
-	CapacityUsed             prometheus.Gauge
-	CapacityRemaining        prometheus.Gauge
-	CapacityUsedNonDFS       prometheus.Gauge
-	BlocksTotal              prometheus.Gauge
-	FilesTotal               prometheus.Gauge
-	CorruptBlocks            prometheus.Gauge
-	ExcessBlocks             prometheus.Gauge
-	StaleDataNodes           prometheus.Gauge
-	pnGcCount                prometheus.Gauge
-	pnGcTime                 prometheus.Gauge
-	cmsGcCount               prometheus.Gauge
-	cmsGcTime                prometheus.Gauge
-	heapMemoryUsageCommitted prometheus.Gauge
-	heapMemoryUsageInit      prometheus.Gauge
-	heapMemoryUsageMax       prometheus.Gauge
-	heapMemoryUsageUsed      prometheus.Gauge
-	isActive                 prometheus.Gauge
+type NameNodeExportOpt struct {
+	PromNamespace string
+	Hostname      string
+	JmxUrl        string
+	cluster       string
 }
 
-func NewExporter(url string) *Exporter {
-	return &Exporter{
-		url: url,
-		MissingBlocks: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "MissingBlocks",
-			Help:      "MissingBlocks",
-		}),
-		CapacityTotal: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "CapacityTotal",
-			Help:      "CapacityTotal",
-		}),
-		CapacityUsed: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "CapacityUsed",
-			Help:      "CapacityUsed",
-		}),
-		CapacityRemaining: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "CapacityRemaining",
-			Help:      "CapacityRemaining",
-		}),
-		CapacityUsedNonDFS: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "CapacityUsedNonDFS",
-			Help:      "CapacityUsedNonDFS",
-		}),
-		BlocksTotal: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "BlocksTotal",
-			Help:      "BlocksTotal",
-		}),
-		FilesTotal: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "FilesTotal",
-			Help:      "FilesTotal",
-		}),
-		CorruptBlocks: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "CorruptBlocks",
-			Help:      "CorruptBlocks",
-		}),
-		ExcessBlocks: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "ExcessBlocks",
-			Help:      "ExcessBlocks",
-		}),
-		StaleDataNodes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "StaleDataNodes",
-			Help:      "StaleDataNodes",
-		}),
-		pnGcCount: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "ParNew_CollectionCount",
-			Help:      "ParNew GC Count",
-		}),
-		pnGcTime: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "ParNew_CollectionTime",
-			Help:      "ParNew GC Time",
-		}),
-		cmsGcCount: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "ConcurrentMarkSweep_CollectionCount",
-			Help:      "ConcurrentMarkSweep GC Count",
-		}),
-		cmsGcTime: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "ConcurrentMarkSweep_CollectionTime",
-			Help:      "ConcurrentMarkSweep GC Time",
-		}),
-		heapMemoryUsageCommitted: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "heapMemoryUsageCommitted",
-			Help:      "heapMemoryUsageCommitted",
-		}),
-		heapMemoryUsageInit: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "heapMemoryUsageInit",
-			Help:      "heapMemoryUsageInit",
-		}),
-		heapMemoryUsageMax: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "heapMemoryUsageMax",
-			Help:      "heapMemoryUsageMax",
-		}),
-		heapMemoryUsageUsed: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "heapMemoryUsageUsed",
-			Help:      "heapMemoryUsageUsed",
-		}),
-		isActive: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "isActive",
-			Help:      "isActive",
-		}),
+type NameNodeExporter struct {
+	PromNamespace string
+	Hostname      string
+	JmxUrl        string
+	cluster       string
+
+	TotalLoad *prometheus.Desc //当前连接数
+
+	MissingBlocks *prometheus.Desc
+	CorruptBlocks *prometheus.Desc
+	ExcessBlocks  *prometheus.Desc
+	BlocksTotal   *prometheus.Desc
+
+	FilesTotal *prometheus.Desc
+
+	ExpiredHeartbeats  *prometheus.Desc
+	LastCheckpointTime *prometheus.Desc
+
+	CapacityTotal      *prometheus.Desc
+	CapacityUsed       *prometheus.Desc
+	CapacityRemaining  *prometheus.Desc
+	CapacityUsedNonDFS *prometheus.Desc
+
+	StaleDataNodes             *prometheus.Desc
+	NumLiveDataNodes           *prometheus.Desc
+	NumDeadDataNodes           *prometheus.Desc
+	VolumeFailuresTotal        *prometheus.Desc
+	EstimatedCapacityLostTotal *prometheus.Desc
+
+	HAState *prometheus.Desc
+	//FSState *prometheus.Desc
+
+	GcCount      *prometheus.Desc
+	GcTimeMillis *prometheus.Desc
+
+	MemNonHeapMaxM  *prometheus.Desc
+	MemNonHeapUsedM *prometheus.Desc
+	MemHeapMaxM     *prometheus.Desc
+	MemHeapUsedM    *prometheus.Desc
+	MemMaxM         *prometheus.Desc
+}
+
+func NewNameNodeExporter(opt *NameNodeExportOpt) *NameNodeExporter {
+	descNamePrefix := opt.PromNamespace + "_"
+	return &NameNodeExporter{
+		PromNamespace: opt.PromNamespace,
+		Hostname:      opt.Hostname,
+		JmxUrl:        opt.JmxUrl,
+		cluster:       opt.cluster,
+		TotalLoad: prometheus.NewDesc(
+			descNamePrefix+"TotalLoad", "Current number of connections",
+			NameNodeLabel, nil),
+
+		MissingBlocks: prometheus.NewDesc(
+			descNamePrefix+"MissingBlocks", "Current number of missing blocks",
+			NameNodeLabel, nil),
+		CorruptBlocks: prometheus.NewDesc(
+			descNamePrefix+"CorruptBlocks", "Current number of blocks with corrupt replicas",
+			NameNodeLabel, nil),
+		ExcessBlocks: prometheus.NewDesc(
+			descNamePrefix+"ExcessBlocks", "Current number of excess blocks",
+			NameNodeLabel, nil),
+		BlocksTotal: prometheus.NewDesc(
+			descNamePrefix+"BlocksTotal", "Current number of allocated blocks in the system",
+			NameNodeLabel, nil),
+		FilesTotal: prometheus.NewDesc(
+			descNamePrefix+"FilesTotal", "Current number of files and directories",
+			NameNodeLabel, nil),
+
+		ExpiredHeartbeats: prometheus.NewDesc(
+			descNamePrefix+"ExpiredHeartbeats", "Total number of expired heartbeats",
+			NameNodeLabel, nil),
+		LastCheckpointTime: prometheus.NewDesc(
+			descNamePrefix+"LastCheckpointTime", "\tTime in milliseconds since epoch of last checkpoint",
+			NameNodeLabel, nil),
+
+		CapacityTotal: prometheus.NewDesc(
+			descNamePrefix+"CapacityTotal", "Current raw capacity of DataNodes in bytes",
+			NameNodeLabel, nil),
+		CapacityUsed: prometheus.NewDesc(
+			descNamePrefix+"CapacityUsed", "Current used capacity across all DataNodes in bytes",
+			NameNodeLabel, nil),
+		CapacityRemaining: prometheus.NewDesc(
+			descNamePrefix+"CapacityRemaining", "Current remaining capacity in bytes",
+			NameNodeLabel, nil),
+		CapacityUsedNonDFS: prometheus.NewDesc(
+			descNamePrefix+"CapacityUsedNonDFS", "Current space used by DataNodes for non DFS purposes in bytes",
+			NameNodeLabel, nil),
+
+		StaleDataNodes: prometheus.NewDesc(
+			descNamePrefix+"StaleDataNodes", "Current number of DataNodes marked stale due to delayed heartbeat",
+			NameNodeLabel, nil),
+		NumLiveDataNodes: prometheus.NewDesc(
+			descNamePrefix+"NumLiveDataNodes", "Number of datanodes which are currently live",
+			NameNodeLabel, nil),
+		NumDeadDataNodes: prometheus.NewDesc(
+			descNamePrefix+"NumDeadDataNodes", "Number of datanodes which are currently dead",
+			NameNodeLabel, nil),
+
+		VolumeFailuresTotal: prometheus.NewDesc(
+			descNamePrefix+"VolumeFailuresTotal", "Total number of volume failures across all Datanodes",
+			NameNodeLabel, nil),
+		EstimatedCapacityLostTotal: prometheus.NewDesc(
+			descNamePrefix+"EstimatedCapacityLostTotal", "An estimate of the total capacity lost due to volume failures",
+			NameNodeLabel, nil),
+
+		HAState: prometheus.NewDesc(
+			descNamePrefix+"HAState", "(HA-only) Current state of the NameNode: initializing or active or standby or stopping state",
+			NameNodeLabel, nil),
+		//FSState: prometheus.NewDesc(
+		//	descNamePrefix+"FSState", "Current state of the file system: Safemode or Operational",
+		//	NameNodeLabel, nil),
+
+		GcCount: prometheus.NewDesc(
+			descNamePrefix+"GcCount", "Total GC count",
+			NameNodeLabel, nil),
+		GcTimeMillis: prometheus.NewDesc(
+			descNamePrefix+"GcTimeMillis", "Total GC time in msec",
+			NameNodeLabel, nil),
+
+		MemNonHeapMaxM: prometheus.NewDesc(
+			descNamePrefix+"MemNonHeapMaxM", "Max non-heap memory size in MB",
+			NameNodeLabel, nil),
+		MemNonHeapUsedM: prometheus.NewDesc(
+			descNamePrefix+"MemNonHeapUsedM", "Current non-heap memory used in MB",
+			NameNodeLabel, nil),
+		MemHeapMaxM: prometheus.NewDesc(
+			descNamePrefix+"MemHeapMaxM", "Max heap memory size in MB",
+			NameNodeLabel, nil),
+		MemHeapUsedM: prometheus.NewDesc(
+			descNamePrefix+"MemHeapUsedM", "Current heap memory used in MB",
+			NameNodeLabel, nil),
+		MemMaxM: prometheus.NewDesc(
+			descNamePrefix+"MemMaxM", "Max memory size in MB",
+			NameNodeLabel, nil),
 	}
 }
 
 // Describe implements the prometheus.Collector interface.
-func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	e.MissingBlocks.Describe(ch)
-	e.CapacityTotal.Describe(ch)
-	e.CapacityUsed.Describe(ch)
-	e.CapacityRemaining.Describe(ch)
-	e.CapacityUsedNonDFS.Describe(ch)
-	e.BlocksTotal.Describe(ch)
-	e.FilesTotal.Describe(ch)
-	e.CorruptBlocks.Describe(ch)
-	e.ExcessBlocks.Describe(ch)
-	e.StaleDataNodes.Describe(ch)
-	e.pnGcCount.Describe(ch)
-	e.pnGcTime.Describe(ch)
-	e.cmsGcCount.Describe(ch)
-	e.cmsGcTime.Describe(ch)
-	e.heapMemoryUsageCommitted.Describe(ch)
-	e.heapMemoryUsageInit.Describe(ch)
-	e.heapMemoryUsageMax.Describe(ch)
-	e.heapMemoryUsageUsed.Describe(ch)
-	e.isActive.Describe(ch)
+func (e *NameNodeExporter) Describe(ch chan<- *prometheus.Desc) {
+	ch <- e.TotalLoad
+	ch <- e.MissingBlocks
+	ch <- e.CorruptBlocks
+	ch <- e.ExcessBlocks
+	ch <- e.BlocksTotal
+	ch <- e.FilesTotal
+	ch <- e.ExpiredHeartbeats
+	ch <- e.LastCheckpointTime
+	ch <- e.CapacityUsed
+	ch <- e.CapacityTotal
+	ch <- e.CapacityRemaining
+	ch <- e.StaleDataNodes
+	ch <- e.NumLiveDataNodes
+	ch <- e.NumDeadDataNodes
+	ch <- e.VolumeFailuresTotal
+	ch <- e.EstimatedCapacityLostTotal
+	ch <- e.HAState
+	//ch <- e.FSState
+	ch <- e.GcCount
+	ch <- e.GcTimeMillis
+	ch <- e.MemMaxM
+	ch <- e.MemNonHeapMaxM
+	ch <- e.MemNonHeapUsedM
+	ch <- e.MemHeapMaxM
+	ch <- e.MemHeapUsedM
 }
 
 // Collect implements the prometheus.Collector interface.
-func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	resp, err := http.Get(e.url)
+func (e *NameNodeExporter) Collect(ch chan<- prometheus.Metric) {
+	resp, err := http.Get(e.JmxUrl)
 	if err != nil {
-		log.Error(err)
+		fmt.Println(err)
 	}
 	defer resp.Body.Close()
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Error(err)
+		fmt.Println(err)
 	}
-	var f interface{}
-	err = json.Unmarshal(data, &f)
+	//var f map[string]structs.JmxBean
+	bean := structs.JmxBean{}
+	err = json.Unmarshal(data, &bean)
 	if err != nil {
-		log.Error(err)
+		fmt.Println(err)
 	}
 	// {"beans":[{"name":"Hadoop:service=NameNode,name=FSNamesystem", ...}, {"name":"java.lang:type=MemoryPool,name=Code Cache", ...}, ...]}
-	m := f.(map[string]interface{})
-	// [{"name":"Hadoop:service=NameNode,name=FSNamesystem", ...}, {"name":"java.lang:type=MemoryPool,name=Code Cache", ...}, ...]
-	var nameList = m["beans"].([]interface{})
-	for _, nameData := range nameList {
-		nameDataMap := nameData.(map[string]interface{})
-		/*
-			{
-				"name" : "Hadoop:service=NameNode,name=FSNamesystem",
-				"modelerType" : "FSNamesystem",
-				"tag.Context" : "dfs",
-				"tag.HAState" : "active",
-				"tag.TotalSyncTimes" : "23 6 ",
-				"tag.Hostname" : "CNHORTO7502.line.ism",
-				"MissingBlocks" : 0,
-				"MissingReplOneBlocks" : 0,
-				"ExpiredHeartbeats" : 0,
-				"TransactionsSinceLastCheckpoint" : 2007,
-				"TransactionsSinceLastLogRoll" : 7,
-				"LastWrittenTransactionId" : 172706,
-				"LastCheckpointTime" : 1456089173101,
-				"CapacityTotal" : 307099828224,
-				"CapacityTotalGB" : 286.0,
-				"CapacityUsed" : 1471291392,
-				"CapacityUsedGB" : 1.0,
-				"CapacityRemaining" : 279994568704,
-				"CapacityRemainingGB" : 261.0,
-				"CapacityUsedNonDFS" : 25633968128,
-				"TotalLoad" : 6,
-				"SnapshottableDirectories" : 0,
-				"Snapshots" : 0,
-				"LockQueueLength" : 0,
-				"BlocksTotal" : 67,
-				"NumFilesUnderConstruction" : 0,
-				"NumActiveClients" : 0,
-				"FilesTotal" : 184,
-				"PendingReplicationBlocks" : 0,
-				"UnderReplicatedBlocks" : 0,
-				"CorruptBlocks" : 0,
-				"ScheduledReplicationBlocks" : 0,
-				"PendingDeletionBlocks" : 0,
-				"ExcessBlocks" : 0,
-				"PostponedMisreplicatedBlocks" : 0,
-				"PendingDataNodeMessageCount" : 0,
-				"MillisSinceLastLoadedEdits" : 0,
-				"BlockCapacity" : 2097152,
-				"StaleDataNodes" : 0,
-				"TotalFiles" : 184,
-				"TotalSyncCount" : 7
+	//var bean = f["beans"]
+	for _, DataMap := range bean.Beans {
+		if DataMap["name"] == consts.NNFSMetrics {
+			ch <- prometheus.MustNewConstMetric(e.TotalLoad, prometheus.GaugeValue, DataMap["TotalLoad"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.MissingBlocks, prometheus.GaugeValue, DataMap["MissingBlocks"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.CorruptBlocks, prometheus.GaugeValue, DataMap["CorruptBlocks"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.ExcessBlocks, prometheus.GaugeValue, DataMap["ExcessBlocks"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.BlocksTotal, prometheus.GaugeValue, DataMap["BlocksTotal"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.FilesTotal, prometheus.GaugeValue, DataMap["FilesTotal"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.LastCheckpointTime, prometheus.GaugeValue, DataMap["LastCheckpointTime"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.CapacityTotal, prometheus.GaugeValue, DataMap["CapacityTotal"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.CapacityUsed, prometheus.GaugeValue, DataMap["CapacityUsed"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.CapacityRemaining, prometheus.GaugeValue, DataMap["CapacityRemaining"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.CapacityUsedNonDFS, prometheus.GaugeValue, DataMap["CapacityUsedNonDFS"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.StaleDataNodes, prometheus.GaugeValue, DataMap["StaleDataNodes"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.NumLiveDataNodes, prometheus.GaugeValue, DataMap["NumLiveDataNodes"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.NumDeadDataNodes, prometheus.GaugeValue, DataMap["NumDeadDataNodes"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.VolumeFailuresTotal, prometheus.GaugeValue, DataMap["VolumeFailuresTotal"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.EstimatedCapacityLostTotal, prometheus.GaugeValue, DataMap["EstimatedCapacityLostTotal"].(float64), e.cluster, e.Hostname)
+			switch strings.ToLower(DataMap["tag.HAState"].(string)) {
+			case "stopping":
+				ch <- prometheus.MustNewConstMetric(e.HAState, prometheus.GaugeValue, 0, e.cluster, e.Hostname)
+			case "active":
+				ch <- prometheus.MustNewConstMetric(e.HAState, prometheus.GaugeValue, 1, e.cluster, e.Hostname)
+			case "initializing":
+				ch <- prometheus.MustNewConstMetric(e.HAState, prometheus.GaugeValue, 3, e.cluster, e.Hostname)
+			case "standby":
+				ch <- prometheus.MustNewConstMetric(e.HAState, prometheus.GaugeValue, 4, e.cluster, e.Hostname)
+			default:
+				ch <- prometheus.MustNewConstMetric(e.HAState, prometheus.GaugeValue, -1, e.cluster, e.Hostname)
 			}
-		*/
-		if nameDataMap["name"] == "Hadoop:service=NameNode,name=FSNamesystem" {
-			e.MissingBlocks.Set(nameDataMap["MissingBlocks"].(float64))
-			e.CapacityTotal.Set(nameDataMap["CapacityTotal"].(float64))
-			e.CapacityUsed.Set(nameDataMap["CapacityUsed"].(float64))
-			e.CapacityRemaining.Set(nameDataMap["CapacityRemaining"].(float64))
-			e.CapacityUsedNonDFS.Set(nameDataMap["CapacityUsedNonDFS"].(float64))
-			e.BlocksTotal.Set(nameDataMap["BlocksTotal"].(float64))
-			e.FilesTotal.Set(nameDataMap["FilesTotal"].(float64))
-			e.CorruptBlocks.Set(nameDataMap["CorruptBlocks"].(float64))
-			e.ExcessBlocks.Set(nameDataMap["ExcessBlocks"].(float64))
-			e.StaleDataNodes.Set(nameDataMap["StaleDataNodes"].(float64))
-		}
-		if nameDataMap["name"] == "java.lang:type=GarbageCollector,name=ParNew" {
-			e.pnGcCount.Set(nameDataMap["CollectionCount"].(float64))
-			e.pnGcTime.Set(nameDataMap["CollectionTime"].(float64))
-		}
-		if nameDataMap["name"] == "java.lang:type=GarbageCollector,name=ConcurrentMarkSweep" {
-			e.cmsGcCount.Set(nameDataMap["CollectionCount"].(float64))
-			e.cmsGcTime.Set(nameDataMap["CollectionTime"].(float64))
-		}
-		/*
-			"name" : "java.lang:type=Memory",
-			"modelerType" : "sun.management.MemoryImpl",
-			"HeapMemoryUsage" : {
-				"committed" : 1060372480,
-				"init" : 1073741824,
-				"max" : 1060372480,
-				"used" : 124571464
-			},
-		*/
-		if nameDataMap["name"] == "java.lang:type=Memory" {
-			heapMemoryUsage := nameDataMap["HeapMemoryUsage"].(map[string]interface{})
-			e.heapMemoryUsageCommitted.Set(heapMemoryUsage["committed"].(float64))
-			e.heapMemoryUsageInit.Set(heapMemoryUsage["init"].(float64))
-			e.heapMemoryUsageMax.Set(heapMemoryUsage["max"].(float64))
-			e.heapMemoryUsageUsed.Set(heapMemoryUsage["used"].(float64))
 		}
 
-		if nameDataMap["name"] == "Hadoop:service=NameNode,name=FSNamesystem" {
-			if nameDataMap["tag.HAState"] == "active" {
-				e.isActive.Set(1)
-			} else {
-				e.isActive.Set(0)
-			}
+		if DataMap["name"] == consts.NNJVMMetrics {
+			ch <- prometheus.MustNewConstMetric(e.GcCount, prometheus.GaugeValue, DataMap["GcCount"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.GcTimeMillis, prometheus.GaugeValue, DataMap["GcTimeMillis"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.MemMaxM, prometheus.GaugeValue, DataMap["MemMaxM"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.MemHeapUsedM, prometheus.GaugeValue, DataMap["MemHeapUsedM"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.MemHeapMaxM, prometheus.GaugeValue, DataMap["MemHeapMaxM"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.MemNonHeapUsedM, prometheus.GaugeValue, DataMap["MemNonHeapUsedM"].(float64), e.cluster, e.Hostname)
+			ch <- prometheus.MustNewConstMetric(e.MemNonHeapMaxM, prometheus.GaugeValue, DataMap["MemNonHeapMaxM"].(float64), e.cluster, e.Hostname)
 		}
 
 	}
-	e.MissingBlocks.Collect(ch)
-	e.CapacityTotal.Collect(ch)
-	e.CapacityUsed.Collect(ch)
-	e.CapacityRemaining.Collect(ch)
-	e.CapacityUsedNonDFS.Collect(ch)
-	e.BlocksTotal.Collect(ch)
-	e.FilesTotal.Collect(ch)
-	e.CorruptBlocks.Collect(ch)
-	e.ExcessBlocks.Collect(ch)
-	e.StaleDataNodes.Collect(ch)
-	e.pnGcCount.Collect(ch)
-	e.pnGcTime.Collect(ch)
-	e.cmsGcCount.Collect(ch)
-	e.cmsGcTime.Collect(ch)
-	e.heapMemoryUsageCommitted.Collect(ch)
-	e.heapMemoryUsageInit.Collect(ch)
-	e.heapMemoryUsageMax.Collect(ch)
-	e.heapMemoryUsageUsed.Collect(ch)
-	e.isActive.Collect(ch)
+
 }
 
 func main() {
+	NameNodeNamespace := "namenode"
+	listenAddress := flag.String("web.listen-address", "localhost:9070", "Address on which to expose metrics and web interface.")
+	metricsPath := flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+	namenodeJmxUrl := flag.String("namenode.jmx.url", "http://82.157.57.170:50070/jmx", "Hadoop JMX URL.")
 	flag.Parse()
-
-	exporter := NewExporter(*namenodeJmxUrl)
+	opt := NameNodeExportOpt{
+		PromNamespace: NameNodeNamespace, Hostname: "hdfs1", JmxUrl: *namenodeJmxUrl, cluster: "testcluster",
+	}
+	exporter := NewNameNodeExporter(&opt)
+	fmt.Println(exporter.PromNamespace)
 	prometheus.MustRegister(exporter)
-
-	log.Printf("Starting Server: %s", *listenAddress)
-	http.Handle(*metricsPath, prometheus.Handler())
+	fmt.Println("Starting Server: %s", *listenAddress)
+	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 		<head><title>NameNode Exporter</title></head>
 		<body>
 		<h1>NameNode Exporter</h1>
-		<p><a href="` + *metricsPath + `">Metrics</a></p>
+		<p><a href="/metrics">Metrics</a></p>
 		</body>
 		</html>`))
 	})
